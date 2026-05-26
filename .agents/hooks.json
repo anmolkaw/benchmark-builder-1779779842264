@@ -1,0 +1,42 @@
+{
+  "nextdev-protocol": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node \"/var/folders/gm/bv9gmxns23j4jm_p3qpwpff00000gn/T/nextdev-interviews/benchmark-builder-1779779842264/.nextdev/hooks/nextdev-hooks.cjs\" --editor=antigravity",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/var/folders/gm/bv9gmxns23j4jm_p3qpwpff00000gn/T/nextdev-interviews/benchmark-builder-1779779842264/.nextdev/hooks/nextdev-hooks.cjs\" --editor=antigravity",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/var/folders/gm/bv9gmxns23j4jm_p3qpwpff00000gn/T/nextdev-interviews/benchmark-builder-1779779842264/.nextdev/hooks/nextdev-hooks.cjs\" --editor=antigravity",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node \"/var/folders/gm/bv9gmxns23j4jm_p3qpwpff00000gn/T/nextdev-interviews/benchmark-builder-1779779842264/.nextdev/hooks/nextdev-hooks.cjs\" --editor=antigravity",
+        "timeout": 10
+      }
+    ]
+  }
+}
