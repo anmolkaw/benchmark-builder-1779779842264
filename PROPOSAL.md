@@ -1,61 +1,44 @@
-# Benchmark Proposal
-
-> Replace each placeholder section with your answer. Keep it to roughly one printed page total. Concrete > abstract — pick a specific failure mode, not a topic area.
-
----
+# Benchmark Proposal: PaySync Async Migration Reliability
 
 ## 1. API surface
 
-Which fintech API and which feature/integration are you proposing a benchmark for? Be specific (e.g. "Stripe Connect — application_fee handling on partial refunds" rather than "Stripe payments").
-
-> _your answer here_
-
----
+PaySync payment client migration for four money-moving methods: `charge`, `refund`, `lookup`, and `cancelTransaction`. The benchmark asks an AI agent to migrate a callback-style TypeScript SDK to Promise-based async/await while preserving method names, exported types, validation behavior, custom errors, retry behavior, cancellation behavior, response mapping, and TypeScript compatibility.
 
 ## 2. Why coding agents fail here
 
-What's the concrete failure mode? What does a naive AI implementation typically get wrong? If you've hit this in production, say so — and what the bug looked like.
+Payment SDK migrations look easy on the happy path, so agents often wrap callbacks in `new Promise` and stop there. That misses production-critical edge cases: duplicate gateway callbacks, aborts during retry backoff, structured gateway errors that must stay typed, and cancellation flows where request submission is not the same thing as provider-confirmed cancellation. In a real checkout or operations dashboard, those mistakes can double-settle requests, leak listeners, hide retry hints, or mark an indeterminate transaction as safely cancelled.
 
-> _your answer here_
+## 3. Test cases (3-5)
 
----
+#### Test 1: Duplicate callback resolution
+- Asserts: `charge`/`refund` resolve exactly once with the first gateway response and ignore later duplicate callbacks.
+- Catches: a naive Promise wrapper that does not guard callback re-entry or cleanup.
+- Senior instinct: settle-once discipline around any external payment callback.
 
-## 3. Test cases (3–5)
+#### Test 2: Abort during retry backoff
+- Asserts: aborting an in-flight request rejects with `CancellationError`, clears pending retry timers, and prevents further HTTP attempts.
+- Catches: accepting `signal?: AbortSignal` in types but never wiring it into the retry chain.
+- Senior instinct: cancellation must be observable, prompt, and cleanup-oriented.
 
-For each test, give:
-- **What it asserts** (the observable behavior being checked)
-- **The naive AI implementation it catches** (the wrong-but-plausible code path an agent would write)
-- **The senior instinct the test rewards** (what someone with production experience would know to do differently)
+#### Test 3: Custom error preservation
+- Asserts: gateway `_raw` payloads still translate to `RateLimitError` and `InsufficientFundsError` with their diagnostic fields intact.
+- Catches: converting all callback failures to generic `Error` rejections.
+- Senior instinct: API compatibility includes error classes and observability payloads.
 
-#### Test 1
-- Asserts:
-- Catches:
-- Senior instinct:
+#### Test 4: Cancel transaction two-stage settlement
+- Asserts: `cancelTransaction` resolves only after the cancellation request succeeds and the matching `cancelled` event is emitted.
+- Catches: resolving immediately when `/v1/cancellations` accepts the request.
+- Senior instinct: provider state machines have submission and completion phases.
 
-#### Test 2
-- Asserts:
-- Catches:
-- Senior instinct:
-
-#### Test 3
-- Asserts:
-- Catches:
-- Senior instinct:
-
-#### (Test 4, Test 5 — add if useful)
-
----
+#### Test 5: Export surface compatibility
+- Asserts: existing named exports, option types, and error classes remain available after the async refactor.
+- Catches: default-export rewrites, renamed instances, or deleted legacy types.
+- Senior instinct: migrations should be additive unless the public contract explicitly changes.
 
 ## 4. Frontier-model pass-rate prediction
 
-How often do you think a frontier coding model (e.g. Claude Sonnet 4.6, best-of-3 with a Goose-style harness) would pass the full benchmark? Give a rough percentage and one sentence on why. The point isn't to be exactly right; it's to show you've thought about calibration.
-
-> _your answer here_
-
----
+Strong frontier coding agents would pass about 60-70% of hidden cases on the first attempt because the happy-path async migration is straightforward, but duplicate settlement, abort cleanup, custom error translation, and two-stage cancellation require careful specification reading rather than mechanical refactoring.
 
 ## 5. Why this is a production-realistic problem
 
-Why does this matter to a real team using this API? What system / use case would actually run into it? (One or two sentences.)
-
-> _your answer here_
+Fintech teams routinely modernize old SDKs while dashboards, reconciliation jobs, and support tooling still depend on precise legacy semantics. The benchmark mirrors the kind of migration where a tiny async bug can affect charges, refunds, and cancellation visibility in production.

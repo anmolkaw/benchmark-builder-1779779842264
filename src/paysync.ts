@@ -1,13 +1,13 @@
 /**
- * paysync.ts — PaySync client (callback-style, 2017-era).
+ * paysync.ts — PaySync client, migrated from callbacks to async/await.
  *
- * The PaySync class exposes four callback-style methods over the
+ * The PaySync class exposes four Promise-returning methods over the
  * fictional payments processor:
  *
- *   paySync.charge(amount, opts, cb)
- *   paySync.refund(txnId, opts, cb)
- *   paySync.lookup(txnId, cb)
- *   paySync.cancelTransaction(txnId, cb)
+ *   await paySync.charge(amount, opts)
+ *   await paySync.refund(txnId, opts)
+ *   await paySync.lookup(txnId, opts)
+ *   await paySync.cancelTransaction(txnId, opts)
  *
  * History notes (see CHANGELOG):
  *   - v0.1 (2017-03)   shipped charge/refund/lookup with the callback
@@ -31,8 +31,8 @@
  *                      response handler so callers can branch on
  *                      err instanceof RateLimitError / etc.
  *
- * All four methods accept either an explicit callback or
- * `opts.cancellationToken` (legacy token interface).
+ * Async options support `signal?: AbortSignal`, while the legacy
+ * `opts.cancellationToken` remains supported for compatibility.
  */
 
 import { EventEmitter } from 'node:events';
@@ -56,11 +56,23 @@ export interface ChargeOptions {
   currency?: string;
   customerId?: string;
   cancellationToken?: CancellationToken;
+  signal?: AbortSignal;
 }
 
 export interface RefundOptions {
   reason?: string;
   cancellationToken?: CancellationToken;
+  signal?: AbortSignal;
+}
+
+export interface LookupOptions {
+  cancellationToken?: CancellationToken;
+  signal?: AbortSignal;
+}
+
+export interface CancelTransactionOptions {
+  cancellationToken?: CancellationToken;
+  signal?: AbortSignal;
 }
 
 export interface Receipt {
@@ -80,6 +92,18 @@ export interface Transaction {
   currency: string;
   status: 'authorized' | 'captured' | 'refunded' | 'cancelled';
   createdAt: number;
+}
+
+export interface ChargeResult {
+  txnId: string;
+  receipt: Receipt;
+  metadata: RequestMetadata;
+}
+
+export interface RefundResult {
+  refundId: string;
+  receipt: Receipt;
+  metadata: RequestMetadata;
 }
 
 export type ChargeCallback = (
@@ -130,12 +154,61 @@ function translateRawError(err: RawError | null): Error | null {
   return err;
 }
 
+interface CancellationBridge {
+  signal?: AbortSignal;
+  cleanup(): void;
+}
+
+function createCancellationBridge(
+  cancellationToken?: CancellationToken,
+  signal?: AbortSignal
+): CancellationBridge {
+  if (cancellationToken?.isCancelled() || signal?.aborted) {
+    throw new CancellationError();
+  }
+
+  if (!cancellationToken) {
+    return {
+      signal,
+      cleanup(): void {
+        // The request helper owns any listener it attaches to this signal.
+      },
+    };
+  }
+
+  const controller = new AbortController();
+  const abort = (): void => {
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  };
+  const onExternalAbort = (): void => abort();
+
+  signal?.addEventListener('abort', onExternalAbort, { once: true });
+  cancellationToken.onCancel(abort);
+
+  return {
+    signal: controller.signal,
+    cleanup(): void {
+      signal?.removeEventListener('abort', onExternalAbort);
+    },
+  };
+}
+
+function isCancelledPayload(payload: unknown, txnId: string): boolean {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as { txnId?: unknown }).txnId === txnId
+  );
+}
+
 // ---------------------------------------------------------------------------
 // PaySync class
 // ---------------------------------------------------------------------------
 
 export class PaySync extends EventEmitter {
-  charge(amount: number, opts: ChargeOptions, cb: ChargeCallback): void {
+  async charge(amount: number, opts: ChargeOptions = {}): Promise<ChargeResult> {
     // Synchronous validation — predates the callback-error pattern.
     const fieldErrors: Record<string, string> = {};
     if (typeof amount !== 'number' || !Number.isFinite(amount)) {
@@ -147,44 +220,45 @@ export class PaySync extends EventEmitter {
       throw new ValidationError({ fieldErrors });
     }
 
-    const token = opts.cancellationToken;
-    let settled = false;
-
-    const settle: ChargeCallback = (err, txnId, receipt, metadata) => {
-      if (settled) return;
-      settled = true;
-      cb(err, txnId, receipt, metadata);
-    };
-
-    if (token?.isCancelled()) {
-      settle(new CancellationError());
-      return;
-    }
-    token?.onCancel(() => settle(new CancellationError()));
-
     const body = {
       amount,
       currency: opts.currency ?? 'USD',
       customerId: opts.customerId,
     };
+    const bridge = createCancellationBridge(opts.cancellationToken, opts.signal);
 
-    _doRequest('/v1/charges', body, (err, ...rest) => {
-      if (settled) return;
-      if (err) {
-        settle(translateRawError(err));
-        return;
-      }
-      // Gateway delivers (txnId, receipt, metadata) as positional args.
-      const [txnId, receipt, metadata] = rest as [
-        string,
-        Receipt,
-        RequestMetadata
-      ];
-      settle(null, txnId, receipt, metadata);
+    return new Promise<ChargeResult>((resolve, reject) => {
+      let settled = false;
+
+      const settle = (err: Error | null, result?: ChargeResult): void => {
+        if (settled) return;
+        settled = true;
+        bridge.cleanup();
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(result as ChargeResult);
+      };
+
+      _doRequest('/v1/charges', body, (err, ...rest) => {
+        if (settled) return;
+        if (err) {
+          settle(translateRawError(err));
+          return;
+        }
+        // Gateway delivers (txnId, receipt, metadata) as positional args.
+        const [txnId, receipt, metadata] = rest as [
+          string,
+          Receipt,
+          RequestMetadata
+        ];
+        settle(null, { txnId, receipt, metadata });
+      }, bridge.signal);
     });
   }
 
-  refund(txnId: string, opts: RefundOptions, cb: RefundCallback): void {
+  async refund(txnId: string, opts: RefundOptions = {}): Promise<RefundResult> {
     const fieldErrors: Record<string, string> = {};
     if (typeof txnId !== 'string' || txnId.length === 0) {
       fieldErrors.txnId = 'must be a non-empty string';
@@ -192,40 +266,41 @@ export class PaySync extends EventEmitter {
     if (Object.keys(fieldErrors).length > 0) {
       throw new ValidationError({ fieldErrors });
     }
-
-    const token = opts.cancellationToken;
-    let settled = false;
-
-    const settle: RefundCallback = (err, refundId, receipt, metadata) => {
-      if (settled) return;
-      settled = true;
-      cb(err, refundId, receipt, metadata);
-    };
-
-    if (token?.isCancelled()) {
-      settle(new CancellationError());
-      return;
-    }
-    token?.onCancel(() => settle(new CancellationError()));
 
     const body = { txnId, reason: opts.reason };
+    const bridge = createCancellationBridge(opts.cancellationToken, opts.signal);
 
-    _doRequest('/v1/refunds', body, (err, ...rest) => {
-      if (settled) return;
-      if (err) {
-        settle(translateRawError(err));
-        return;
-      }
-      const [refundId, receipt, metadata] = rest as [
-        string,
-        Receipt,
-        RequestMetadata
-      ];
-      settle(null, refundId, receipt, metadata);
+    return new Promise<RefundResult>((resolve, reject) => {
+      let settled = false;
+
+      const settle = (err: Error | null, result?: RefundResult): void => {
+        if (settled) return;
+        settled = true;
+        bridge.cleanup();
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(result as RefundResult);
+      };
+
+      _doRequest('/v1/refunds', body, (err, ...rest) => {
+        if (settled) return;
+        if (err) {
+          settle(translateRawError(err));
+          return;
+        }
+        const [refundId, receipt, metadata] = rest as [
+          string,
+          Receipt,
+          RequestMetadata
+        ];
+        settle(null, { refundId, receipt, metadata });
+      }, bridge.signal);
     });
   }
 
-  lookup(txnId: string, cb: LookupCallback): void {
+  async lookup(txnId: string, opts: LookupOptions = {}): Promise<Transaction> {
     const fieldErrors: Record<string, string> = {};
     if (typeof txnId !== 'string' || txnId.length === 0) {
       fieldErrors.txnId = 'must be a non-empty string';
@@ -234,13 +309,31 @@ export class PaySync extends EventEmitter {
       throw new ValidationError({ fieldErrors });
     }
 
-    _doRequest('/v1/lookup', { txnId }, (err, ...rest) => {
-      if (err) {
-        cb(translateRawError(err));
-        return;
-      }
-      const [txn] = rest as [Transaction];
-      cb(null, txn);
+    const bridge = createCancellationBridge(opts.cancellationToken, opts.signal);
+
+    return new Promise<Transaction>((resolve, reject) => {
+      let settled = false;
+
+      const settle = (err: Error | null, txn?: Transaction): void => {
+        if (settled) return;
+        settled = true;
+        bridge.cleanup();
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(txn as Transaction);
+      };
+
+      _doRequest('/v1/lookup', { txnId }, (err, ...rest) => {
+        if (settled) return;
+        if (err) {
+          settle(translateRawError(err));
+          return;
+        }
+        const [txn] = rest as [Transaction];
+        settle(null, txn);
+      }, bridge.signal);
     });
   }
 
@@ -250,7 +343,10 @@ export class PaySync extends EventEmitter {
    * `'cancelled'` event on this PaySync instance with payload
    * `{ txnId: string }`.
    */
-  cancelTransaction(txnId: string, cb: CancelCallback): void {
+  async cancelTransaction(
+    txnId: string,
+    opts: CancelTransactionOptions = {}
+  ): Promise<void> {
     const fieldErrors: Record<string, string> = {};
     if (typeof txnId !== 'string' || txnId.length === 0) {
       fieldErrors.txnId = 'must be a non-empty string';
@@ -259,12 +355,60 @@ export class PaySync extends EventEmitter {
       throw new ValidationError({ fieldErrors });
     }
 
-    httpClient.post('/v1/cancellations', { txnId }, (err) => {
-      if (err) {
-        cb(translateRawError(err));
-        return;
-      }
-      cb(null);
+    const bridge = createCancellationBridge(opts.cancellationToken, opts.signal);
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let submissionSettled = false;
+      let submissionAccepted = false;
+      let completionReceived = false;
+
+      const cleanup = (): void => {
+        this.off('cancelled', onCancelled);
+        bridge.signal?.removeEventListener('abort', onAbort);
+        bridge.cleanup();
+      };
+
+      const settle = (err?: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      };
+
+      const maybeResolve = (): void => {
+        if (submissionAccepted && completionReceived) {
+          settle();
+        }
+      };
+
+      const onCancelled = (payload: unknown): void => {
+        if (!isCancelledPayload(payload, txnId)) {
+          return;
+        }
+        completionReceived = true;
+        maybeResolve();
+      };
+
+      const onAbort = (): void => settle(new CancellationError());
+
+      bridge.signal?.addEventListener('abort', onAbort, { once: true });
+      this.on('cancelled', onCancelled);
+
+      httpClient.post('/v1/cancellations', { txnId }, (err) => {
+        if (settled || submissionSettled) return;
+        submissionSettled = true;
+        if (err) {
+          settle(translateRawError(err) ?? err);
+          return;
+        }
+        submissionAccepted = true;
+        maybeResolve();
+      });
     });
   }
 }

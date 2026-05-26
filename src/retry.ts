@@ -36,17 +36,22 @@ export function _doRequest(
   let pendingTimer: NodeJS.Timeout | null = null;
   let settled = false;
 
-  const finish = (err: RawError | null, ...rest: unknown[]): void => {
-    if (settled) return;
-    settled = true;
-    callback(err, ...rest);
-  };
-
-  const onAbort = (): void => {
+  const cleanup = (): void => {
     if (pendingTimer) {
       clearTimeout(pendingTimer);
       pendingTimer = null;
     }
+    signal?.removeEventListener('abort', onAbort);
+  };
+
+  const finish = (err: RawError | null, ...rest: unknown[]): void => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    callback(err, ...rest);
+  };
+
+  const onAbort = (): void => {
     finish(new CancellationError());
   };
 
@@ -54,7 +59,7 @@ export function _doRequest(
     finish(new CancellationError());
     return;
   }
-  signal?.addEventListener('abort', onAbort);
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   const tryOnce = (): void => {
     if (settled) return;

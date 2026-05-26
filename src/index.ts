@@ -1,7 +1,11 @@
 export { PaySync } from './paysync';
 export type {
   ChargeOptions,
+  ChargeResult,
+  CancelTransactionOptions,
   RefundOptions,
+  RefundResult,
+  LookupOptions,
   Receipt,
   RequestMetadata,
   Transaction,
