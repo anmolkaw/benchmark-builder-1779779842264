@@ -22,6 +22,136 @@ describe('PaySync hidden-style async migration cases', () => {
     expect(typeof publicApi.createCancellationToken).toBe('function');
   });
 
+  test('catches compatibility break that removes callback-style charge', async () => {
+    const receipt = { amountCents: 500, currency: 'USD', capturedAt: 11 };
+    const metadata = { requestId: 'req_charge_cb', serverTimeMs: 3 };
+    const lateReceipt = { amountCents: 999, currency: 'USD', capturedAt: 12 };
+    const lateMetadata = { requestId: 'req_charge_late', serverTimeMs: 4 };
+    const callback = jest.fn();
+
+    post.mockImplementation((_url, _body, cb) => {
+      cb(null, 'txn_charge_cb', receipt, metadata);
+      cb(null, 'txn_charge_late', lateReceipt, lateMetadata);
+    });
+
+    new PaySync().charge(500, {}, callback);
+    await Promise.resolve();
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(
+      null,
+      'txn_charge_cb',
+      receipt,
+      metadata
+    );
+  });
+
+  test('catches compatibility break that removes callback-style refund', async () => {
+    const receipt = { amountCents: 500, currency: 'USD', capturedAt: 22 };
+    const metadata = { requestId: 'req_refund_cb', serverTimeMs: 5 };
+
+    post.mockImplementation((url, body, cb) => {
+      expect(url).toBe('/v1/refunds');
+      expect(body).toEqual({ txnId: 'txn_refund_cb', reason: 'duplicate' });
+      cb(null, 'rf_refund_cb', receipt, metadata);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      new PaySync().refund(
+        'txn_refund_cb',
+        { reason: 'duplicate' },
+        (err, refundId, callbackReceipt, callbackMetadata) => {
+          try {
+            expect(err).toBeNull();
+            expect(refundId).toBe('rf_refund_cb');
+            expect(callbackReceipt).toBe(receipt);
+            expect(callbackMetadata).toBe(metadata);
+            resolve();
+          } catch (assertionError) {
+            reject(assertionError);
+          }
+        }
+      );
+    });
+  });
+
+  test('catches compatibility break that removes callback-style lookup', async () => {
+    const txn = {
+      txnId: 'txn_lookup_cb',
+      amountCents: 750,
+      currency: 'USD',
+      status: 'captured' as const,
+      createdAt: 33,
+    };
+
+    post.mockImplementation((_url, _body, cb) => cb(null, txn));
+
+    await new Promise<void>((resolve, reject) => {
+      new PaySync().lookup('txn_lookup_cb', (err, callbackTxn) => {
+        try {
+          expect(err).toBeNull();
+          expect(callbackTxn).toBe(txn);
+          resolve();
+        } catch (assertionError) {
+          reject(assertionError);
+        }
+      });
+    });
+  });
+
+  test('catches compatibility break that removes callback-style cancelTransaction', async () => {
+    const paySync = new PaySync();
+    const callback = jest.fn();
+
+    post.mockImplementation((url, body, cb) => {
+      expect(url).toBe('/v1/cancellations');
+      expect(body).toEqual({ txnId: 'txn_cancel_cb' });
+      cb(null);
+    });
+
+    paySync.cancelTransaction('txn_cancel_cb', callback);
+    await Promise.resolve();
+    expect(callback).not.toHaveBeenCalled();
+
+    paySync.emit('cancelled', { txnId: 'txn_other' });
+    await Promise.resolve();
+    expect(callback).not.toHaveBeenCalled();
+
+    paySync.emit('cancelled', { txnId: 'txn_cancel_cb' });
+    await Promise.resolve();
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(null);
+    expect(paySync.listenerCount('cancelled')).toBe(0);
+  });
+
+  test('catches migration that drops legacy CancellationToken support', async () => {
+    const token = publicApi.createCancellationToken();
+    const callback = jest.fn();
+    let finishRequest:
+      | ((err: Error | null, ...rest: unknown[]) => void)
+      | undefined;
+
+    post.mockImplementation((_url, _body, cb) => {
+      finishRequest = cb;
+    });
+
+    new PaySync().charge(100, { cancellationToken: token }, callback);
+    token.cancel();
+    await Promise.resolve();
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback.mock.calls[0][0]).toBeInstanceOf(CancellationError);
+
+    finishRequest?.(
+      null,
+      'txn_after_cancel',
+      { amountCents: 100, currency: 'USD', capturedAt: 1 },
+      { requestId: 'req_after_cancel', serverTimeMs: 1 }
+    );
+    await Promise.resolve();
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
   test('catches naive response mapping that drops receipt and metadata', async () => {
     const receipt = { amountCents: 2500, currency: 'EUR', capturedAt: 123 };
     const metadata = { requestId: 'req_mapping', serverTimeMs: 12 };

@@ -2,7 +2,8 @@
  * paysync.ts — PaySync client, migrated from callbacks to async/await.
  *
  * The PaySync class exposes four Promise-returning methods over the
- * fictional payments processor:
+ * fictional payments processor, with callback overloads retained for
+ * compatibility with older callers:
  *
  *   await paySync.charge(amount, opts)
  *   await paySync.refund(txnId, opts)
@@ -163,10 +164,6 @@ function createCancellationBridge(
   cancellationToken?: CancellationToken,
   signal?: AbortSignal
 ): CancellationBridge {
-  if (cancellationToken?.isCancelled() || signal?.aborted) {
-    throw new CancellationError();
-  }
-
   if (!cancellationToken) {
     return {
       signal,
@@ -186,6 +183,9 @@ function createCancellationBridge(
 
   signal?.addEventListener('abort', onExternalAbort, { once: true });
   cancellationToken.onCancel(abort);
+  if (cancellationToken.isCancelled() || signal?.aborted) {
+    abort();
+  }
 
   return {
     signal: controller.signal,
@@ -208,7 +208,140 @@ function isCancelledPayload(payload: unknown, txnId: string): boolean {
 // ---------------------------------------------------------------------------
 
 export class PaySync extends EventEmitter {
-  async charge(amount: number, opts: ChargeOptions = {}): Promise<ChargeResult> {
+  charge(amount: number, opts?: ChargeOptions): Promise<ChargeResult>;
+  charge(amount: number, opts: ChargeOptions, cb: ChargeCallback): void;
+  charge(
+    amount: number,
+    opts: ChargeOptions = {},
+    cb?: ChargeCallback
+  ): Promise<ChargeResult> | void {
+    if (cb) {
+      this.forwardChargeCallback(this.chargePromise(amount, opts), cb);
+      return;
+    }
+
+    try {
+      return this.chargePromise(amount, opts);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  refund(txnId: string, opts?: RefundOptions): Promise<RefundResult>;
+  refund(txnId: string, opts: RefundOptions, cb: RefundCallback): void;
+  refund(
+    txnId: string,
+    opts: RefundOptions = {},
+    cb?: RefundCallback
+  ): Promise<RefundResult> | void {
+    if (cb) {
+      this.forwardRefundCallback(this.refundPromise(txnId, opts), cb);
+      return;
+    }
+
+    try {
+      return this.refundPromise(txnId, opts);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  lookup(txnId: string): Promise<Transaction>;
+  lookup(txnId: string, opts: LookupOptions): Promise<Transaction>;
+  lookup(txnId: string, cb: LookupCallback): void;
+  lookup(txnId: string, opts: LookupOptions, cb: LookupCallback): void;
+  lookup(
+    txnId: string,
+    optsOrCb: LookupOptions | LookupCallback = {},
+    cb?: LookupCallback
+  ): Promise<Transaction> | void {
+    const opts = typeof optsOrCb === 'function' ? {} : optsOrCb;
+    const callback = typeof optsOrCb === 'function' ? optsOrCb : cb;
+
+    if (callback) {
+      this.forwardLookupCallback(this.lookupPromise(txnId, opts), callback);
+      return;
+    }
+
+    try {
+      return this.lookupPromise(txnId, opts);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  cancelTransaction(txnId: string): Promise<void>;
+  cancelTransaction(
+    txnId: string,
+    opts: CancelTransactionOptions
+  ): Promise<void>;
+  cancelTransaction(txnId: string, cb: CancelCallback): void;
+  cancelTransaction(
+    txnId: string,
+    opts: CancelTransactionOptions,
+    cb: CancelCallback
+  ): void;
+  cancelTransaction(
+    txnId: string,
+    optsOrCb: CancelTransactionOptions | CancelCallback = {},
+    cb?: CancelCallback
+  ): Promise<void> | void {
+    const opts = typeof optsOrCb === 'function' ? {} : optsOrCb;
+    const callback = typeof optsOrCb === 'function' ? optsOrCb : cb;
+
+    if (callback) {
+      this.forwardCancelCallback(
+        this.cancelTransactionPromise(txnId, opts),
+        callback
+      );
+      return;
+    }
+
+    try {
+      return this.cancelTransactionPromise(txnId, opts);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  private forwardChargeCallback(
+    promise: Promise<ChargeResult>,
+    cb: ChargeCallback
+  ): void {
+    promise.then(
+      ({ txnId, receipt, metadata }) => cb(null, txnId, receipt, metadata),
+      (err: Error) => cb(err)
+    );
+  }
+
+  private forwardRefundCallback(
+    promise: Promise<RefundResult>,
+    cb: RefundCallback
+  ): void {
+    promise.then(
+      ({ refundId, receipt, metadata }) => cb(null, refundId, receipt, metadata),
+      (err: Error) => cb(err)
+    );
+  }
+
+  private forwardLookupCallback(
+    promise: Promise<Transaction>,
+    cb: LookupCallback
+  ): void {
+    promise.then((txn) => cb(null, txn), (err: Error) => cb(err));
+  }
+
+  private forwardCancelCallback(
+    promise: Promise<void>,
+    cb: CancelCallback
+  ): void {
+    promise.then(() => cb(null), (err: Error) => cb(err));
+  }
+
+  private chargePromise(
+    amount: number,
+    opts: ChargeOptions = {}
+  ): Promise<ChargeResult> {
     // Synchronous validation — predates the callback-error pattern.
     const fieldErrors: Record<string, string> = {};
     if (typeof amount !== 'number' || !Number.isFinite(amount)) {
@@ -258,7 +391,10 @@ export class PaySync extends EventEmitter {
     });
   }
 
-  async refund(txnId: string, opts: RefundOptions = {}): Promise<RefundResult> {
+  private refundPromise(
+    txnId: string,
+    opts: RefundOptions = {}
+  ): Promise<RefundResult> {
     const fieldErrors: Record<string, string> = {};
     if (typeof txnId !== 'string' || txnId.length === 0) {
       fieldErrors.txnId = 'must be a non-empty string';
@@ -300,7 +436,10 @@ export class PaySync extends EventEmitter {
     });
   }
 
-  async lookup(txnId: string, opts: LookupOptions = {}): Promise<Transaction> {
+  private lookupPromise(
+    txnId: string,
+    opts: LookupOptions = {}
+  ): Promise<Transaction> {
     const fieldErrors: Record<string, string> = {};
     if (typeof txnId !== 'string' || txnId.length === 0) {
       fieldErrors.txnId = 'must be a non-empty string';
@@ -338,12 +477,11 @@ export class PaySync extends EventEmitter {
   }
 
   /**
-   * cancelTransaction — submits a cancellation order. The callback fires
-   * on submission. Server-side completion is signaled via the
-   * `'cancelled'` event on this PaySync instance with payload
-   * `{ txnId: string }`.
+   * cancelTransaction submits a cancellation order, then waits for
+   * server-side completion via the `'cancelled'` event on this PaySync
+   * instance with payload `{ txnId: string }`.
    */
-  async cancelTransaction(
+  private cancelTransactionPromise(
     txnId: string,
     opts: CancelTransactionOptions = {}
   ): Promise<void> {
@@ -396,6 +534,10 @@ export class PaySync extends EventEmitter {
 
       const onAbort = (): void => settle(new CancellationError());
 
+      if (bridge.signal?.aborted) {
+        settle(new CancellationError());
+        return;
+      }
       bridge.signal?.addEventListener('abort', onAbort, { once: true });
       this.on('cancelled', onCancelled);
 
